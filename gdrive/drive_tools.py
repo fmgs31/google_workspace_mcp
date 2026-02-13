@@ -29,6 +29,7 @@ from core.server import server
 from core.config import get_transport_mode
 from gdrive.drive_helpers import (
     DRIVE_QUERY_PATTERNS,
+    FOLDER_MIME_TYPE,
     build_drive_list_params,
     check_public_link_permission,
     format_permission_info,
@@ -484,7 +485,9 @@ async def create_drive_file(
         f"[create_drive_file] Invoked. Email: '{user_google_email}', File Name: {file_name}, Folder ID: {folder_id}, fileUrl: {fileUrl}"
     )
 
-    if not content and not fileUrl:
+    is_folder_creation = mime_type == FOLDER_MIME_TYPE
+
+    if not is_folder_creation and not content and not fileUrl:
         raise Exception("You must provide either 'content' or 'fileUrl'.")
 
     file_data = None
@@ -496,8 +499,18 @@ async def create_drive_file(
         "mimeType": mime_type,
     }
 
+    if is_folder_creation:
+        created_file = await asyncio.to_thread(
+            service.files()
+            .create(
+                body=file_metadata,
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
     # Prefer fileUrl if both are provided
-    if fileUrl:
+    elif fileUrl:
         logger.info(f"[create_drive_file] Fetching file from URL: {fileUrl}")
 
         # Check if this is a file:// URL
