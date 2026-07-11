@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/workspace-mcp.svg)](https://pypi.org/project/workspace-mcp/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/workspace-mcp?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/workspace-mcp)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/workspace-mcp?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=pypi+downloads)](https://pepy.tech/projects/workspace-mcp)
 [![Website](https://img.shields.io/badge/Website-workspacemcp.com-green.svg)](https://workspacemcp.com)
 
 *Full natural language control over Google Calendar, Drive, Gmail, Docs, Sheets, Slides, Forms, Tasks, Contacts, and Chat through all MCP clients, AI assistants and developer tools.*
@@ -246,10 +246,13 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | **🖥️ Server** | | |
 | `WORKSPACE_MCP_BASE_URI` | | Base server URI (no port) — default `http://localhost` |
 | `WORKSPACE_MCP_PORT` | | Listening port — default `8000`. Also controls the stdio-mode OAuth callback port. The `PORT` env var takes precedence if set. |
-| `WORKSPACE_MCP_HOST` | | Bind host — default `0.0.0.0` |
+| `WORKSPACE_MCP_HOST` | | Bind host — default `0.0.0.0` for OAuth 2.1 HTTP, `127.0.0.1` for legacy streamable HTTP. |
 | `WORKSPACE_MCP_TRANSPORT` | | `stdio` or `streamable-http`; used when `--transport` is not passed |
 | `WORKSPACE_MCP_HTTP_PORT` | | Advanced legacy-stdio sidecar `/mcp` port for local `workspace-cli` access. Disabled when empty. Binds to `127.0.0.1` only and is accessible to local processes. |
 | `WORKSPACE_EXTERNAL_URL` | | External URL for reverse proxy setups |
+| `WORKSPACE_MCP_BRAND_NAME` | | OAuth 2.1 consent-page server name — default FastMCP's name |
+| `WORKSPACE_MCP_BRAND_ICON_URL` | | OAuth 2.1 consent-page logo (hosted URL or `data:` URI), shown at 64px wide — default FastMCP's logo |
+| `WORKSPACE_MCP_BRAND_WEBSITE_URL` | | OAuth 2.1 consent-page website link |
 | `WORKSPACE_ATTACHMENT_DIR` | | Downloaded attachments dir and default trusted local attachment directory — default `~/.workspace-mcp/attachments/` |
 | `WORKSPACE_MCP_URL` | | Remote MCP endpoint URL for CLI |
 | `ALLOWED_FILE_DIRS` | | Colon-separated allowlist for local file reads |
@@ -259,9 +262,10 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | `WORKSPACE_MCP_READ_ONLY` | | `true`, `1`, or `yes` to request read-only scopes and filter write tools |
 | `WORKSPACE_MCP_PERMISSIONS` | | Space-separated `service:level` entries, e.g. `gmail:send drive:readonly`; mutually exclusive with tools and read-only |
 | **🔑 OAuth 2.1 & Multi-User** | | |
-| `MCP_ENABLE_OAUTH21` | | `true` to enable OAuth 2.1 multi-user support |
+| `MCP_ENABLE_OAUTH21` | | `true` to enable OAuth 2.1 multi-user support. Required for remote or shared HTTP endpoints (`--transport streamable-http`); optional for local-only legacy HTTP, which binds to `127.0.0.1` by default. |
 | `EXTERNAL_OAUTH21_PROVIDER` | | `true` for external OAuth flow with bearer tokens |
 | `WORKSPACE_MCP_STATELESS_MODE` | | `true` for stateless container-friendly operation |
+| `WORKSPACE_MCP_LOG_DIR` | | Directory for `mcp_server_debug.log` — defaults to `~/.google_workspace_mcp/logs` |
 | `GOOGLE_OAUTH_REDIRECT_URI` | | Override OAuth callback URL — default auto-constructed |
 | `OAUTH_CUSTOM_REDIRECT_URIS` | | Comma-separated additional redirect URIs |
 | `OAUTH_ALLOWED_ORIGINS` | | Comma-separated additional CORS origins |
@@ -328,6 +332,8 @@ pip install "workspace-mcp[gcs]"
    | [Calendar](https://console.cloud.google.com/flows/enableapi?apiid=calendar-json.googleapis.com) | [Drive](https://console.cloud.google.com/flows/enableapi?apiid=drive.googleapis.com) | [Gmail](https://console.cloud.google.com/flows/enableapi?apiid=gmail.googleapis.com) | [Docs](https://console.cloud.google.com/flows/enableapi?apiid=docs.googleapis.com) |
    | [Sheets](https://console.cloud.google.com/flows/enableapi?apiid=sheets.googleapis.com) | [Slides](https://console.cloud.google.com/flows/enableapi?apiid=slides.googleapis.com) | [Forms](https://console.cloud.google.com/flows/enableapi?apiid=forms.googleapis.com) | [Tasks](https://console.cloud.google.com/flows/enableapi?apiid=tasks.googleapis.com) |
    | [Chat](https://console.cloud.google.com/flows/enableapi?apiid=chat.googleapis.com) | [People](https://console.cloud.google.com/flows/enableapi?apiid=people.googleapis.com) | [Custom Search](https://console.cloud.google.com/flows/enableapi?apiid=customsearch.googleapis.com) | [Apps Script](https://console.cloud.google.com/flows/enableapi?apiid=script.googleapis.com) |
+
+   > **Google Chat needs extra setup.** Enabling the API is not enough — you must also configure a Chat app and use a Workspace account. See [Chat setup](#-google-chat) under the tool list.
 
 4. **Set Credentials** — see [Environment Variable Reference](#quick-start) above, or:
    ```bash
@@ -444,6 +450,8 @@ uv run main.py
 
 **◆ HTTP Mode (Recommended)**
 ```bash
+export MCP_ENABLE_OAUTH21=true
+export GOOGLE_OAUTH_CLIENT_ID="..."
 uv run main.py \
   --transport streamable-http
 ```
@@ -531,6 +539,8 @@ uv run main.py --tool-tier complete  # ○ All available tools
 ```bash
 docker build -t workspace-mcp .
 docker run -p 8000:8000 -v $(pwd):/app \
+  -e MCP_ENABLE_OAUTH21=true \
+  -e GOOGLE_OAUTH_CLIENT_ID="..." \
   workspace-mcp --transport streamable-http
 
 # With tool selection via environment variables
@@ -553,6 +563,12 @@ docker run -e TOOLS="gmail drive calendar" workspace-mcp
 The `workspace-cli` command lists tools and calls them against a running server — with encrypted, disk-backed OAuth token caching so you only authenticate once. On first run it opens a browser for Google consent; subsequent runs reuse the cached tokens automatically.
 
 Tokens are stored encrypted at `~/.workspace-mcp/cli-tokens/` using a Fernet key auto-generated at `~/.workspace-mcp/.cli-encryption-key`.
+
+To use workspace-cli globally, you'll want to start in this repo and run `uv tool install .`
+
+Once complete, you'll have workspace-cli available globally via `workspace-cli`
+
+Note: there is a public (but abandoned) pypi package with the same name - do not use uvx, as it will pull the wrong thing. 
 
 <details open>
 <summary>▶ <b>workspace-cli Commands</b> <sub><sup>← Persistent OAuth, no re-auth on every call</sup></sub></summary>
@@ -762,13 +778,15 @@ cp .env.oauth21 .env
 | <sub>`create_drive_file`</sub> | <sub>Core</sub> | <sub>Create files or fetch from URLs</sub> |
 | <sub>`create_drive_folder`</sub> | <sub>Core</sub> | <sub>Create empty folders in Drive or shared drives</sub> |
 | <sub>`import_to_google_doc`</sub> | <sub>Core</sub> | <sub>Import files (MD, DOCX, HTML, etc.) as Google Docs</sub> |
+| <sub>`import_to_google_slides`</sub> | <sub>Core</sub> | <sub>Import presentation files (PPTX, PPT, ODP) as Google Slides</sub> |
+| <sub>`import_to_google_sheets`</sub> | <sub>Core</sub> | <sub>Import spreadsheet files (XLSX, CSV, TSV, etc.) as Google Sheets</sub> |
 | <sub>`get_drive_shareable_link`</sub> | <sub>Core</sub> | <sub>Get shareable links for a file</sub> |
 | <sub>`list_drive_items`</sub> | <sub>Extended</sub> | <sub>List folder contents or shared drives</sub> |
 | <sub>`copy_drive_file`</sub> | <sub>Extended</sub> | <sub>Copy existing files (templates) with optional renaming</sub> |
-| <sub>`update_drive_file`</sub> | <sub>Extended</sub> | <sub>Update file metadata, move between folders</sub> |
+| <sub>`update_drive_file`</sub> | <sub>Extended</sub> | <sub>Update metadata, move files, or replace Google Apps content</sub> |
 | <sub>`manage_drive_access`</sub> | <sub>Extended</sub> | <sub>Grant, update, revoke permissions, and transfer ownership</sub> |
 | <sub>`set_drive_file_permissions`</sub> | <sub>Extended</sub> | <sub>Set link sharing and file-level sharing settings</sub> |
-| <sub>`get_drive_file_permissions`</sub> | <sub>Complete</sub> | <sub>Get detailed file permissions</sub> |
+| <sub>`get_drive_file_permissions`</sub> | <sub>Complete</sub> | <sub>Get file metadata, parents, and permissions</sub> |
 | <sub>`check_drive_file_public_access`</sub> | <sub>Complete</sub> | <sub>Check public sharing status</sub> |
 
 #### 📧 Gmail <sub>[`gmail_tools.py`](gmail/gmail_tools.py)</sub>
@@ -932,6 +950,40 @@ Saved files expire after 1 hour and are cleaned up automatically.
 | <sub>`create_reaction`</sub> | <sub>Core</sub> | <sub>Add emoji reaction to a message</sub> |
 | <sub>`download_chat_attachment`</sub> | <sub>Extended</sub> | <sub>Download attachment from a chat message</sub> |
 
+<details>
+<summary>💬 <b>Chat setup — required before any Chat tool works</b></summary>
+
+Unlike other Workspace services, **enabling the Chat API is not enough** — the Chat API refuses every request until you configure a Chat app, and it only works with Google Workspace accounts. Two extra steps are required:
+
+**1. Configure the Chat app**
+
+Enabling `chat.googleapis.com` alone causes every Chat tool to fail. You must also complete the **Configuration** tab so the API has an app identity to attach requests to:
+
+- Open [Chat API → Configuration](https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat) (APIs & Services → Enabled APIs → Google Chat API → **Configuration**)
+- Fill in the three required fields under **Application info**:
+  - **App name** — e.g. `Workspace MCP` (up to 25 characters)
+  - **Avatar URL** — any HTTPS URL to a square PNG/JPEG (e.g. `https://developers.google.com/chat/images/quickstart-app-avatar.png`)
+  - **Description** — e.g. `Workspace MCP` (up to 40 characters)
+- Click **Save**
+
+> This server authenticates **as the signed-in user** (user OAuth), not as a bot. You do **not** need to enable interactive features, create a service account, or publish the app — the Configuration form above is the only Chat-specific setup required.
+
+**2. Use a Google Workspace account**
+
+The Chat API is **not available to personal `@gmail.com` accounts**. Configuring it with one returns:
+
+```text
+Google Chat API is only available to Google Workspace users.
+```
+
+Sign in with a Business/Enterprise Google Workspace account (the same account you pass as `user_google_email`).
+
+The required scopes (`chat.spaces.readonly`, `chat.messages.readonly`, `chat.messages`, `chat.spaces`) are requested automatically during the OAuth flow — no manual scope configuration is needed.
+
+<sub>[Configure the Chat API →](https://developers.google.com/workspace/chat/configure-chat-api) · [User authentication →](https://developers.google.com/workspace/chat/authenticate-authorize-chat-user)</sub>
+
+</details>
+
 #### 🔍 Google Custom Search <sub>[`search_tools.py`](gsearch/search_tools.py)</sub>
 
 | <sub>Tool</sub> | <sub>Tier</sub> | <sub>Description</sub> |
@@ -1056,7 +1108,7 @@ uv run pytest
 ```
 
 - `uv sync --group test` installs only the testing stack if you need a slimmer environment.
-- `uv run main.py --transport streamable-http` launches the server with your checked-out code for manual verification.
+- `MCP_ENABLE_OAUTH21=true GOOGLE_OAUTH_CLIENT_ID=... uv run main.py --transport streamable-http` launches the HTTP server with your checked-out code for manual verification.
 - Ruff is part of the `dev` group because pre-push hooks call `ruff check` automatically—run it locally before committing to avoid hook failures.
 
 </details>
@@ -1090,7 +1142,11 @@ export MCP_ENABLE_OAUTH21=true
 uv run main.py --transport streamable-http
 ```
 
-If `MCP_ENABLE_OAUTH21` is not set to `true`, the server will use legacy authentication, which is suitable for clients that do not support OAuth 2.1.
+If `MCP_ENABLE_OAUTH21` is not set to `true`, the server uses legacy authentication. In `streamable-http` mode, legacy authentication binds to `127.0.0.1` by default to keep cached Google credentials local. Set `WORKSPACE_MCP_HOST` explicitly only for trusted networks; use OAuth 2.1 for remote or shared HTTP deployments.
+
+Streamable HTTP requests with an `Origin` header are checked against loopback origins, `WORKSPACE_EXTERNAL_URL`, and `OAUTH_ALLOWED_ORIGINS` to reduce DNS-rebinding risk. Non-browser MCP clients that omit `Origin` are unaffected.
+
+> **vscode-webview origins**: Origins with the `vscode-webview://` scheme are scoped per-extension using the authority component (e.g. `vscode-webview://publisher.extension`). Adding a vscode-webview URI to `OAUTH_ALLOWED_ORIGINS` permits only the specific extension identified by that authority; other extensions are rejected.
 
 <details open>
 <summary>🔐 <b>How the FastMCP GoogleProvider handles OAuth</b> <sub><sup>← Advanced OAuth 2.1 details</sup></sub></summary>
@@ -1127,6 +1183,7 @@ The server supports a stateless mode designed for containerized environments whe
 ```bash
 # Stateless mode requires OAuth 2.1 to be enabled
 export MCP_ENABLE_OAUTH21=true
+export GOOGLE_OAUTH_CLIENT_ID="..."
 export WORKSPACE_MCP_STATELESS_MODE=true
 uv run main.py --transport streamable-http
 ```
@@ -1212,6 +1269,7 @@ The server supports an external OAuth 2.1 provider mode for scenarios where auth
 ```bash
 # External OAuth provider mode requires OAuth 2.1 to be enabled
 export MCP_ENABLE_OAUTH21=true
+export GOOGLE_OAUTH_CLIENT_ID="..."
 export EXTERNAL_OAUTH21_PROVIDER=true
 uv run main.py --transport streamable-http
 ```
@@ -1317,7 +1375,9 @@ export DWD_ALLOWED_DOMAINS="corp.com,subsidiary.io"
 }
 ```
 
-*Note: Make sure to start the server with `--transport streamable-http` when using VS Code MCP.*
+*Note: Make sure to start the server with `--transport streamable-http` when using VS Code MCP. For remote or shared HTTP endpoints, see the [OAuth 2.1 note in the HTTP Mode section](#http-mode-for-debugging-or-web-interfaces).*
+
+> **Origin validation**: VS Code webview clients send a `vscode-webview://<extension-id>` origin, which is rejected by default. Add the specific origin to `OAUTH_ALLOWED_ORIGINS` (e.g. `OAUTH_ALLOWED_ORIGINS=vscode-webview://your.extension-id`) to permit it. Connections to a `localhost`/`127.0.0.1` URL are allowed without extra configuration.
 </details>
 
 ### Claude Code MCP Client Support
@@ -1329,6 +1389,8 @@ export DWD_ALLOWED_DOMAINS="corp.com,subsidiary.io"
 
 ```bash
 # Start the server in HTTP mode first
+export MCP_ENABLE_OAUTH21=true
+export GOOGLE_OAUTH_CLIENT_ID="..."
 uv run main.py --transport streamable-http
 
 # Then add to Claude Code
@@ -1369,6 +1431,23 @@ You also have options for:
 - Use `GOOGLE_OAUTH_REDIRECT_URI` when you only need to override the callback URL
 - The redirect URI must exactly match what's configured in your Google Cloud Console
 - Your reverse proxy must forward OAuth-related requests (`/oauth2callback`, `/oauth2/*`, `/.well-known/*`) to the MCP server
+- Do **not** set `Referrer-Policy: no-referrer` on your proxy. It makes browsers send `Origin: null` on the same-origin consent `POST`, which origin validation rejects with `{"error": "Origin not allowed"}` (logged as `Rejected HTTP request from Origin: null`) even when `WORKSPACE_EXTERNAL_URL` is correct. Use `strict-origin-when-cross-origin` (the browser default) or `same-origin` instead.
+- Some clients send `Origin: null` on the consent `POST` even with correct headers — Chrome serializes the form origin as opaque after the cross-origin OAuth redirect chain (seen with the Claude Code CLI flow). If you hit this, strip **only** a literal `null` `Origin` for the `/consent` endpoint. The consent endpoint is CSRF-protected by its unguessable `txn_id`, and nginx sends the empty-valued `Origin` header as an empty value that ASGI decodes to `b""`; the middleware validates only when `raw_origin` is truthy, so empty bytes skip this request while real origins still pass through and get validated:
+
+  ```nginx
+  location ^~ /consent {
+      set $consent_origin $http_origin;
+      if ($http_origin = "null") { set $consent_origin ""; }
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_set_header Origin $consent_origin;
+      proxy_pass http://127.0.0.1:<port>;
+  }
+  ```
 
 <details open>
 <summary>🚀 <b>Advanced uvx Commands</b> <sub><sup>← More startup options</sup></sub></summary>
@@ -1385,6 +1464,8 @@ uvx workspace-mcp --tool-tier extended  # Core + additional features
 uvx workspace-mcp --tool-tier complete  # All tools
 
 # Start in HTTP mode for debugging
+export MCP_ENABLE_OAUTH21=true
+export GOOGLE_OAUTH_CLIENT_ID="..."
 uvx workspace-mcp --transport streamable-http
 ```
 </details>
@@ -1442,22 +1523,30 @@ If you need to use HTTP mode with Claude Desktop:
 }
 ```
 
-*Note: Make sure to start the server with `--transport streamable-http` when using HTTP mode.*
+*Note: Make sure to start the server with `--transport streamable-http` when using HTTP mode. For remote or shared HTTP endpoints, also enable OAuth 2.1 with `MCP_ENABLE_OAUTH21=true` and `GOOGLE_OAUTH_CLIENT_ID`.*
 
 ### First-Time Authentication
 
-The server uses **Google Desktop OAuth** for simplified authentication:
+Legacy local authentication uses the Google OAuth consent flow. In `stdio` mode, the server tries to open the browser automatically so long Google OAuth URLs do not wrap in terminals or get corrupted during copy/paste, which improves reliability of the redirect flow.
 
-- **No redirect URIs needed**: Desktop OAuth clients handle authentication without complex callback URLs
-- **Automatic flow**: The server manages the entire OAuth process transparently
-- **Transport-agnostic**: Works seamlessly in both stdio and HTTP modes
+- In `stdio` mode, the server starts a local callback listener and tries to open the Google authorization page in your browser automatically.
+- If the browser cannot be opened, the tool response includes the authorization URL to open manually.
+- In `streamable-http` / OAuth 2.1 mode, use your MCP client's OAuth flow instead; the server does not try to open a browser on the host running the HTTP service.
+- When a legacy local auth tool call provides `user_google_email`, the server adds that value as `login_hint` on the Google authorization URL so Google can pre-select the account on the consent screen. This applies to the `stdio` flow whether the server opens the browser or returns the URL; `streamable-http` / OAuth 2.1 flows still rely on the MCP client's OAuth flow.
+
+Example:
+
+```text
+user_google_email="alex@example.com"
+Authorization URL: https://accounts.google.com/o/oauth2/v2/auth?...&login_hint=alex%40example.com
+```
 
 When calling a tool:
-1. Server returns authorization URL
-2. Open URL in browser and authorize
-3. Google provides an authorization code
-4. Paste the code when prompted (or it's handled automatically)
-5. Server completes authentication and retries your request
+1. If an opened browser page appears, complete Google authorization there.
+2. If no browser opens, open the returned authorization URL manually and complete Google authorization there.
+3. After successful authorization, the callback page displays the authenticated email address.
+4. Retry the original tool call with that email as `user_google_email`; the server needs this value to associate the stored Google credentials with the tool request, so the original request is not authorized until it is retried.
+5. Server completes authentication using the stored Google credentials.
 
 ---
 

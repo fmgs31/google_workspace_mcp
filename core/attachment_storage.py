@@ -9,6 +9,7 @@ import base64
 import logging
 import os
 import re
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import NamedTuple, Optional, Dict
@@ -46,6 +47,11 @@ def sanitize_attachment_filename(filename: Optional[str]) -> str:
     """Return a filesystem-safe attachment filename."""
     if not filename:
         return "attachment"
+
+    # Normalize Unicode space separators (category "Zs") to a plain ASCII space.
+    filename = "".join(
+        " " if unicodedata.category(ch) == "Zs" else ch for ch in filename
+    )
 
     sanitized = _WINDOWS_RESERVED_FILENAME_CHARS.sub("_", filename).rstrip(" .")
     if not sanitized:
@@ -281,6 +287,20 @@ def get_attachment_url(file_id: str) -> str:
         Full URL to access the attachment
     """
     from core.config import WORKSPACE_MCP_PORT, WORKSPACE_MCP_BASE_URI
+
+    # In stdio mode the attachment route is served by the lazily-started callback
+    # server; bring it up now so the URL we hand out is actually reachable. The
+    # import is local to avoid pulling the FastAPI/uvicorn auth stack into this
+    # lightweight, widely-imported module (matches every other call site, #832).
+    from auth.oauth_callback_server import ensure_stdio_oauth_callback_available
+
+    success, error_msg = ensure_stdio_oauth_callback_available()
+    if not success:
+        logger.warning(
+            "Failed to start stdio attachment server; attachment URL may be "
+            "unreachable: %s",
+            error_msg,
+        )
 
     # Use external URL if set (for reverse proxy scenarios)
     external_url = os.getenv("WORKSPACE_EXTERNAL_URL")

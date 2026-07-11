@@ -26,7 +26,11 @@ def _load_startup_dependencies():
         is_stateless_mode,
         is_service_account_enabled,
     )
-    from core.log_formatter import EnhancedLogFormatter, configure_file_logging
+    from core.log_formatter import (
+        EnhancedLogFormatter,
+        configure_file_logging,
+        install_noisy_log_filters,
+    )
     from core.utils import check_credentials_directory_permissions
     from core.server import server, set_transport_mode, configure_server_for_http
     from core.tool_tier_loader import resolve_tools_from_tier
@@ -45,6 +49,7 @@ def _load_startup_dependencies():
         is_service_account_enabled,
         EnhancedLogFormatter,
         configure_file_logging,
+        install_noisy_log_filters,
         check_credentials_directory_permissions,
         server,
         set_transport_mode,
@@ -65,6 +70,7 @@ def _load_startup_dependencies():
     is_service_account_enabled,
     EnhancedLogFormatter,
     configure_file_logging,
+    install_noisy_log_filters,
     check_credentials_directory_permissions,
     server,
     set_transport_mode,
@@ -93,7 +99,80 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+install_noisy_log_filters()
 configure_file_logging()
+
+
+def resolve_stdio_callback_port() -> None:
+    """
+    Late-bind the legacy stdio OAuth callback port.
+
+    Streamable HTTP/OAuth 2.1 owns its main HTTP port directly and must keep the
+    normal PORT/WORKSPACE_MCP_PORT semantics. The fallback range only exists for
+    the standalone stdio callback listener.
+    """
+    from auth.port_resolver import resolve_port, NoAvailablePortError, PortConfigError
+
+    try:
+        resolve_port()
+    except (NoAvailablePortError, PortConfigError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    reload_oauth_config()
+
+
+def resolve_callback_port_for_transport(transport: str) -> None:
+    """Apply callback port fallback only to legacy stdio transport."""
+    if transport == "stdio":
+        resolve_stdio_callback_port()
+    else:
+        os.environ.pop("WORKSPACE_MCP_RESOLVED_PORT", None)
+
+
+def resolve_bind_host_for_transport(transport: str) -> str:
+    """Choose a safe default bind host for the selected transport/auth mode."""
+    configured_host = os.getenv("WORKSPACE_MCP_HOST")
+    host = configured_host or "0.0.0.0"
+    if transport != "streamable-http":
+        return host
+
+    config = get_oauth_config()
+    if config.is_oauth21_enabled():
+        return host
+
+    if configured_host:
+        if configured_host not in {"localhost", "127.0.0.1", "::1"}:
+            logger.warning(
+                "Legacy streamable-http mode has no MCP-level auth provider and is "
+                "bound to %s because WORKSPACE_MCP_HOST was explicitly set. "
+                "Use MCP_ENABLE_OAUTH21=true for remotely reachable HTTP deployments.",
+                configured_host,
+            )
+        return configured_host
+
+    logger.warning(
+        "Legacy streamable-http mode has no MCP-level auth provider; binding to "
+        "127.0.0.1 by default. Set WORKSPACE_MCP_HOST explicitly only for trusted "
+        "networks, or use MCP_ENABLE_OAUTH21=true for remote HTTP deployments."
+    )
+    return "127.0.0.1"
+
+
+def validate_streamable_http_auth(transport: str) -> None:
+    """Reject misconfigured OAuth 2.1 HTTP before starting."""
+    if transport != "streamable-http":
+        return
+
+    config = get_oauth_config()
+    if config.is_oauth21_enabled() and not config.is_configured():
+        print(
+            "Error: streamable-http transport with MCP_ENABLE_OAUTH21=true requires "
+            "GOOGLE_OAUTH_CLIENT_ID so OAuth 2.1 protocol authentication can be "
+            "configured.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 
 # Single source of truth: service name -> module path.
 # VALID_SERVICES is derived from this mapping.
@@ -375,32 +454,61 @@ def main():
         )
         sys.exit(1)
 
+    validate_streamable_http_auth(args.transport)
+    resolve_callback_port_for_transport(args.transport)
+
     # Set port and base URI once for reuse throughout the function
-    port = int(os.getenv("PORT", os.getenv("WORKSPACE_MCP_PORT", 8000)))
+    if os.getenv("WORKSPACE_MCP_RESOLVED_PORT") == "1":
+        port = int(os.getenv("WORKSPACE_MCP_PORT", os.getenv("PORT", "8000")))
+    else:
+        port = int(os.getenv("PORT", os.getenv("WORKSPACE_MCP_PORT", "8000")))
     base_uri = os.getenv("WORKSPACE_MCP_BASE_URI", "http://localhost")
-    host = os.getenv("WORKSPACE_MCP_HOST", "0.0.0.0")
+    host = resolve_bind_host_for_transport(args.transport)
     external_url = os.getenv("WORKSPACE_EXTERNAL_URL")
     display_url = external_url if external_url else f"{base_uri}:{port}"
 
-    safe_print("🔧 Google Workspace MCP Server")
-    safe_print("=" * 35)
-    safe_print("📋 Server Information:")
     try:
         version = metadata.version("workspace-mcp")
     except metadata.PackageNotFoundError:
         version = "dev"
-    safe_print(f"   📦 Version: {version}")
-    safe_print(f"   🌐 Transport: {args.transport}")
+
+    mode = "single-user" if args.single_user else "multi-user"
+    pyver = sys.version.split()[0]
+
+    # ANSI color codes for Google brand colors
+    B = "\033[1;34m"  # Blue
+    R = "\033[1;31m"  # Red
+    Y = "\033[1;33m"  # Yellow
+    G = "\033[1;32m"  # Green
+    W = "\033[1;37m"  # White
+    C = "\033[0;36m"  # Cyan
+    D = "\033[0;90m"  # Dim
+    RST = "\033[0m"  # Reset
+
+    info_lines = [f"{C}{args.transport}  ·  {mode}{RST}"]
     if args.transport == "streamable-http":
-        safe_print(f"   🔗 URL: {display_url}")
-        safe_print(f"   🔐 OAuth Callback: {display_url}/oauth2callback")
-    safe_print(f"   👤 Mode: {'Single-user' if args.single_user else 'Multi-user'}")
+        info_lines.append(f"{C}{display_url}{RST}")
     if args.read_only:
-        safe_print("   🔒 Read-Only: Enabled")
+        info_lines.append(f"{Y}read-only{RST}")
     if args.permissions:
-        safe_print("   🔒 Permissions: Granular mode")
-    safe_print(f"   🐍 Python: {sys.version.split()[0]}")
-    safe_print("")
+        info_lines.append(f"{Y}granular permissions{RST}")
+
+    banner = (
+        f"\n{D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}\n"
+        f"\n"
+        f"     {B}██████{R}╗{RST}       {W}Google Workspace{RST}\n"
+        f"     {B}██{RST}╔════╝       {W}MCP Server{RST}  {C}v{version}{RST}\n"
+        f"     {B}██{RST}║  {Y}███{RST}╗\n"
+        f"     {B}██{RST}║   {Y}██{RST}║      {info_lines[0]}\n"
+        f"     {B}╚█████{G}█╔╝{RST}      {C}Python {pyver}{RST}\n"
+        f"      {B}╚════{G}═╝{RST}"
+    )
+    for line in info_lines[1:]:
+        banner += f"\n                       {line}"
+    banner += (
+        f"\n\n{D}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{RST}\n"
+    )
+    safe_print(banner)
 
     # Active Configuration
     safe_print("⚙️ Active Configuration:")
@@ -538,38 +646,39 @@ def main():
     if args.read_only:
         set_read_only(True)
 
-    safe_print(
-        f"🛠️  Loading {len(tools_to_import)} tool module{'s' if len(tools_to_import) != 1 else ''}:"
-    )
+    loaded = []
+    failed = []
     for tool in tools_to_import:
         try:
             tool_imports[tool]()
-            safe_print(
-                f"   {tool_icons.get(tool, '🔧')} {tool.title()} - Google {tool.title()} API integration"
-            )
+            loaded.append(tool)
         except ModuleNotFoundError as exc:
             logger.error("Failed to import tool '%s': %s", tool, exc, exc_info=True)
-            safe_print(f"   ⚠️ Failed to load {tool.title()} tool module ({exc}).")
+            failed.append((tool, exc))
+
+    tool_summary = " ".join(f"{tool_icons.get(t, '🔧')} {t.title()}" for t in loaded)
+    safe_print(f"🛠️  Loaded {len(loaded)} services: {tool_summary}")
+    for tool, exc in failed:
+        safe_print(f"   ⚠️ Failed: {tool.title()} ({exc})")
 
     if perms:
-        safe_print("🔒 Permission Levels:")
-        for svc, lvl in sorted(perms.items()):
-            safe_print(f"   {tool_icons.get(svc, '  ')} {svc}: {lvl}")
+        perm_summary = " | ".join(
+            f"{tool_icons.get(svc, ' ')}{svc}:{lvl}"
+            for svc, lvl in sorted(perms.items())
+        )
+        safe_print(f"🔒 Permissions: {perm_summary}")
     safe_print("")
 
     # Filter tools based on tier configuration (if tier-based loading is enabled)
     filter_server_tools(server)
 
-    safe_print("📊 Configuration Summary:")
-    safe_print(f"   🔧 Services Loaded: {len(tools_to_import)}/{len(tool_imports)}")
+    summary_parts = [f"{len(loaded)}/{len(tool_imports)} services"]
     if args.tool_tier is not None:
+        tier_desc = f"tier={args.tool_tier}"
         if args.tools is not None:
-            safe_print(
-                f"   📊 Tool Tier: {args.tool_tier} (filtered to {', '.join(args.tools)})"
-            )
-        else:
-            safe_print(f"   📊 Tool Tier: {args.tool_tier}")
-    safe_print(f"   📝 Log Level: {logging.getLogger().getEffectiveLevel()}")
+            tier_desc += f" ({', '.join(args.tools)})"
+        summary_parts.append(tier_desc)
+    safe_print(f"📊 {' | '.join(summary_parts)}")
     safe_print("")
 
     # Set global single-user mode flag
@@ -720,22 +829,14 @@ def main():
         else:
             safe_print("")
             safe_print("🚀 Starting STDIO server")
-            # Start minimal OAuth callback server for stdio mode (not needed for service accounts)
+            # The OAuth callback / attachment server is started lazily — only when
+            # an auth flow is initiated or an attachment URL is handed out — so
+            # short-lived spawns (e.g. client health checks) never bind a port and
+            # cannot exhaust the 8000-8004 fallback range (see issue #832).
             if not is_service_account_enabled():
-                from auth.oauth_callback_server import ensure_oauth_callback_available
-
-                success, error_msg = ensure_oauth_callback_available(
-                    "stdio", port, base_uri
+                safe_print(
+                    f"   OAuth callback server will start on demand at {display_url}/oauth2callback"
                 )
-                if success:
-                    safe_print(
-                        f"   OAuth callback server started on {display_url}/oauth2callback"
-                    )
-                else:
-                    warning_msg = "   ⚠️  Warning: Failed to start OAuth callback server"
-                    if error_msg:
-                        warning_msg += f": {error_msg}"
-                    safe_print(warning_msg)
 
         safe_print("✅ Ready for MCP connections")
         safe_print("")
@@ -763,6 +864,7 @@ def main():
                 host=host,
                 port=port,
                 stateless_http=is_stateless_mode(),
+                show_banner=False,
             )
         else:
             if http_port is not None:
@@ -801,7 +903,7 @@ def main():
                         )
 
                     try:
-                        await server.run_stdio_async()
+                        await server.run_stdio_async(show_banner=False)
                     finally:
                         if http_srv:
                             http_srv.should_exit = True
@@ -821,7 +923,7 @@ def main():
 
                 asyncio.run(_run_dual())
             else:
-                server.run()
+                server.run(show_banner=False)
     except KeyboardInterrupt:
         safe_print("\n👋 Server shutdown requested")
         # Clean up OAuth callback server if running

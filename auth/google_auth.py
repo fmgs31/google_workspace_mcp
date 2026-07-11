@@ -1,10 +1,12 @@
 # auth/google_auth.py
 
 import asyncio
+import hashlib
 import json
 import jwt
 import logging
 import os
+import webbrowser
 
 from typing import List, Optional, Tuple, Dict, Any
 from urllib.parse import parse_qs, urlparse
@@ -15,10 +17,12 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import httplib2
+import google_auth_httplib2
 from auth.scopes import SCOPES, get_current_scopes, has_required_scopes  # noqa
 from auth.oauth21_session_store import get_oauth21_session_store
 from auth.credential_store import get_credential_store
-from auth.oauth_config import get_oauth_config, is_stateless_mode
+from auth.oauth_config import is_oauth21_enabled, is_stateless_mode
 from core.config import (
     get_transport_mode,
     get_oauth_redirect_uri,
@@ -34,6 +38,13 @@ except ImportError:
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _session_id_log_fingerprint(session_id: Optional[str]) -> str:
+    """Return a stable, non-reversible session identifier for logs."""
+    if not session_id:
+        return "<none>"
+    return f"sha256:{hashlib.sha256(session_id.encode()).hexdigest()[:12]}"
 
 
 # Constants
@@ -73,6 +84,15 @@ def get_default_credentials_dir():
 
 
 DEFAULT_CREDENTIALS_DIR = get_default_credentials_dir()
+
+
+def _build_authorized_http(
+    credentials: Credentials, timeout: int = 30
+) -> google_auth_httplib2.AuthorizedHttp:
+    """Return credentialed HTTP with an explicit socket timeout."""
+    http = httplib2.Http(timeout=timeout)
+    return google_auth_httplib2.AuthorizedHttp(credentials, http=http)
+
 
 # Session credentials now handled by OAuth21SessionStore - no local cache needed
 # Centralized Client Secrets Path Logic
@@ -525,7 +545,30 @@ async def start_auth_flow(
             required_scopes=current_scopes,
             session_id=session_id,
         )
-        auth_url, _ = flow.authorization_url(access_type="offline", prompt=prompt_type)
+        # Add login_hint if email provided so Google pre-selects the right account
+        auth_kwargs = {"access_type": "offline", "prompt": prompt_type}
+        if initial_email_provided:
+            auth_kwargs["login_hint"] = user_google_email
+        auth_url, _ = flow.authorization_url(**auth_kwargs)
+
+        browser_opened = False
+        should_open_browser = (
+            get_transport_mode() == "stdio" and not is_oauth21_enabled()
+        )
+        if should_open_browser:
+            # Only legacy stdio runs on the user's workstation. HTTP/OAuth 2.1
+            # deployments may be remote, so opening a server-side browser is wrong.
+            try:
+                browser_opened = await asyncio.to_thread(webbrowser.open, auth_url)
+                if browser_opened:
+                    logger.info("Opened auth URL in browser automatically")
+                else:
+                    logger.info(
+                        "webbrowser.open() reported failure (likely headless environment); "
+                        "falling back to displaying URL"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not open browser automatically: {e}")
 
         store = get_oauth21_session_store()
         store.store_oauth_state(
@@ -535,18 +578,23 @@ async def start_auth_flow(
         )
 
         logger.info(
-            f"Auth flow started for {user_display_name}. Advise user to visit: {auth_url}"
+            f"Auth flow started for {user_display_name}. State: {oauth_state[:8]}... "
+            f"Browser opened automatically: {browser_opened}"
         )
 
-        message_lines = [
-            f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
-            f"To proceed, the user must authorize this application for {service_name} access using all required permissions.",
-            "**LLM, please present this exact authorization URL to the user as a clickable hyperlink:**",
-            f"Authorization URL: {auth_url}",
-            f"Markdown for hyperlink: [Click here to authorize {service_name} access]({auth_url})\n",
-            "**LLM, after presenting the link, instruct the user as follows:**",
-            "1. Click the link and complete the authorization in their browser.",
-        ]
+        if browser_opened:
+            message_lines = [
+                f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
+                "1. The authorization page has been **automatically opened in your browser**. Please complete the authorization there.",
+                "   If it did not appear, open this URL manually:",
+                f"   Authorization URL: {auth_url}",
+            ]
+        else:
+            message_lines = [
+                f"**ACTION REQUIRED: Google Authentication Needed for {user_display_name}**\n",
+                f"1. Open this URL in your browser to authorize {service_name} access using all required permissions:",
+                f"   Authorization URL: {auth_url}",
+            ]
         session_info_for_llm = ""
 
         if not initial_email_provided:
@@ -672,6 +720,15 @@ async def handle_auth_callback(
             (state[:8] if state else "<fallback>"),
             state_info.get("session_id") or "<unknown>",
         )
+
+        if not session_id:
+            originating_session_id = state_info.get("session_id")
+            if originating_session_id:
+                session_id = originating_session_id
+                logger.info(
+                    "OAuth callback: bound credentials to originating MCP session %s",
+                    _session_id_log_fingerprint(originating_session_id),
+                )
 
         flow = create_oauth_flow(
             scopes=scopes,
@@ -1147,7 +1204,7 @@ def get_user_info(
     try:
         # Using googleapiclient discovery to get user info
         # Requires 'google-api-python-client' library
-        service = build("oauth2", "v2", credentials=credentials)
+        service = build("oauth2", "v2", http=_build_authorized_http(credentials))
         user_info = service.userinfo().get().execute()
         logger.info(f"Successfully fetched user info: {user_info.get('email')}")
         return user_info
@@ -1269,23 +1326,18 @@ async def get_authenticated_google_service(
         )
 
         redirect_uri = get_oauth_redirect_uri()
-        transport_mode = get_transport_mode()
-        if transport_mode == "stdio":
-            # Only stdio legacy OAuth depends on the standalone callback server.
-            from auth.oauth_callback_server import ensure_oauth_callback_available
+        # Only stdio legacy OAuth depends on the standalone callback server; the
+        # helper no-ops in other transports and binds the port lazily (#832).
+        from auth.oauth_callback_server import ensure_stdio_oauth_callback_available
 
-            config = get_oauth_config()
-            success, error_msg = await asyncio.to_thread(
-                ensure_oauth_callback_available,
-                transport_mode,
-                config.port,
-                config.base_uri,
+        success, error_msg = await asyncio.to_thread(
+            ensure_stdio_oauth_callback_available
+        )
+        if not success:
+            error_detail = f" ({error_msg})" if error_msg else ""
+            raise GoogleAuthenticationError(
+                f"Cannot initiate OAuth flow - callback server unavailable{error_detail}"
             )
-            if not success:
-                error_detail = f" ({error_msg})" if error_msg else ""
-                raise GoogleAuthenticationError(
-                    f"Cannot initiate OAuth flow - callback server unavailable{error_detail}"
-                )
 
         # Generate auth URL and raise exception with it
         auth_response = await start_auth_flow(
@@ -1298,7 +1350,7 @@ async def get_authenticated_google_service(
         raise GoogleAuthenticationError(auth_response)
 
     try:
-        service = build(service_name, version, credentials=credentials)
+        service = build(service_name, version, http=_build_authorized_http(credentials))
         log_user_email = user_google_email
 
         # Try to get email from credentials if needed for validation
